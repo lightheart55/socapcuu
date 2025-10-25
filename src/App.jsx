@@ -1,6 +1,7 @@
-import React, { useState, useCallback } from 'react';
-import { RefreshCw, Clipboard, AlertTriangle, Send, Heart, Droplet, Zap, Home } from 'lucide-react';
+import React, { useState, useCallback, useMemo } from 'react';
+import { RefreshCw, Clipboard, AlertTriangle, Send, Heart, Droplet, Zap, Home, Stethoscope, Key, Pill } from 'lucide-react';
 
+// --- System Instruction for the main 7-point Plan Generation (Feature 1) ---
 const SYSTEM_INSTRUCTION_PLAN = `
 Bạn là Bác sĩ/Nhân viên y tế tại Trạm Y tế Xã/Phường. Nhiệm vụ của bạn là lập một KẾ HOẠCH SƠ CẤP CỨU NGẮN GỌN và CHÍNH XÁC dựa trên 'lý do đến trạm' của bệnh nhân.
 
@@ -24,6 +25,7 @@ Quy tắc Bắt buộc:
 Không hỏi thêm thông tin. Nếu cần thông tin quan trọng để thay đổi xử trí, chỉ liệt kê 2–3 thông tin cần bổ sung trong phần XỬ TRÍ TẠI TRẠM dưới dạng 'Cần bổ sung thông tin:'.
 `;
 
+// --- System Instruction and Schema for Triage Generation (Feature 2) ---
 const SYSTEM_INSTRUCTION_TRIAGE = `
 Bạn là chuyên gia y tế khẩn cấp. Dựa trên lý do đến trạm, hãy đưa ra đánh giá nhanh về mức độ ưu tiên cấp cứu (Triage) và 3 hành động kiểm tra/can thiệp ưu tiên nhất.
 Định dạng đầu ra PHẢI là JSON theo schema được cung cấp. Không thêm bất kỳ văn bản giải thích nào khác. Sử dụng thang phân loại Triage 5 cấp độ (ví dụ: Cấp 1 - Hồi sức, Cấp 5 - Không khẩn cấp).
@@ -32,13 +34,19 @@ Bạn là chuyên gia y tế khẩn cấp. Dựa trên lý do đến trạm, hã
 const TRIAGE_SCHEMA = {
     type: "OBJECT",
     properties: {
-        triageLevel: { type: "STRING" },
-        priority: { type: "STRING" },
-        summary: { type: "STRING" },
-        immediateActions: { type: "ARRAY", items: { type: "STRING" } }
-    }
+        triageLevel: { type: "STRING", description: "Mức độ cấp cứu (ví dụ: Cấp 1, Cấp 2, Cấp 3, Cấp 4, Cấp 5)" },
+        priority: { type: "STRING", description: "Tên mức độ ưu tiên (ví dụ: Hồi sức, Cấp cứu, Khẩn cấp, Bán khẩn cấp, Không khẩn cấp)" },
+        summary: { type: "STRING", description: "Tóm tắt ngắn 1 câu về tình trạng và mức độ nguy hiểm" },
+        immediateActions: {
+            type: "ARRAY",
+            description: "3 hành động kiểm tra/can thiệp ưu tiên nhất cần thực hiện ngay",
+            items: { type: "STRING" }
+        }
+    },
+    propertyOrdering: ["triageLevel", "priority", "summary", "immediateActions"]
 };
 
+// --- System Instruction for Home Care Instructions (Feature 3) ---
 const SYSTEM_INSTRUCTION_HOME_CARE = `
 Bạn là Nhân viên y tế/Bác sĩ tại Trạm Y tế Xã. Nhiệm vụ của bạn là soạn thảo một bản Hướng dẫn Chăm sóc Tại nhà ngắn gọn, rõ ràng, và dễ hiểu dành cho bệnh nhân hoặc người nhà.
 Cấu trúc PHẢI bao gồm 4 mục chính (ghi bằng tiêu đề in đậm):
@@ -46,171 +54,669 @@ Cấu trúc PHẢI bao gồm 4 mục chính (ghi bằng tiêu đề in đậm):
 2.  **CHĂM SÓC KHÔNG DÙNG THUỐC** (Ví dụ: nghỉ ngơi, chườm lạnh, bù nước).
 3.  **CHẾ ĐỘ ĂN UỐNG VÀ SINH HOẠT**.
 4.  **DẤU HIỆU CẦN ĐƯA TRỞ LẠI TRẠM NGAY** (Liệt kê 3-4 dấu hiệu nguy hiểm).
-Văn phong: Gần gũi, động viên, sử dụng ngôn ngữ phổ thông, không dùng thuật ngữ y tế chuyên sâu.
+Văn phong: Gần gũi, động viên, sử dụng ngôn ngữ phổ thông, không dùng thuật ngữ y tế chuyên sâu (ví dụ: thay "Hạ sốt bằng Paracetamol" thành "Uống thuốc hạ sốt (Paracetamol)").
 `;
 
+// --- System Instruction and Schema for Differential Diagnosis (Feature 4) ---
+const SYSTEM_INSTRUCTION_DIFFERENTIAL = `
+Bạn là một chuyên gia y tế chẩn đoán. Dựa trên 'lý do đến trạm' của bệnh nhân (triệu chứng/chấn thương), hãy tạo ra 3-4 chẩn đoán phân biệt có thể xảy ra nhất.
+Định dạng đầu ra PHẢI là JSON theo schema được cung cấp. Không thêm bất kỳ văn bản giải thích nào khác.
+`;
+
+const DIFFERENTIAL_SCHEMA = {
+    type: "OBJECT",
+    properties: {
+        differentialDiagnosis: {
+            type: "ARRAY",
+            description: "Danh sách các chẩn đoán phân biệt có thể xảy ra",
+            items: {
+                type: "OBJECT",
+                properties: {
+                    diagnosis: { type: "STRING", description: "Tên chẩn đoán (tiếng Việt)" },
+                    likelihood: { type: "STRING", description: "Mức độ ưu tiên/khả năng (ví dụ: Rất cao, Trung bình, Thấp)" },
+                    rationale: { type: "STRING", description: "Lý do ngắn gọn dựa trên triệu chứng" }
+                },
+                propertyOrdering: ["diagnosis", "likelihood", "rationale"]
+            }
+        }
+    },
+    propertyOrdering: ["differentialDiagnosis"]
+};
+
+// --- System Instruction and Schema for Drug Advice (Feature 5) ---
+const SYSTEM_INSTRUCTION_DRUG_ADVICE = `
+Bạn là một chuyên gia dược lâm sàng. Dựa trên 'lý do đến trạm' (triệu chứng/chấn thương), hãy đưa ra gợi ý về thuốc điều trị ban đầu (First Line) và các cảnh báo/chống chỉ định quan trọng nhất.
+Giả định mặc định: Người lớn 18–65 tuổi, không mang thai, không suy gan/thận nặng.
+Định dạng đầu ra PHẢI là JSON theo schema được cung cấp. Không thêm bất kỳ văn bản giải thích nào khác.
+`;
+
+const DRUG_ADVICE_SCHEMA = {
+    type: "OBJECT",
+    properties: {
+        firstLineDrug: {
+            type: "OBJECT",
+            properties: {
+                name: { type: "STRING", description: "Tên thuốc gốc (ví dụ: Paracetamol)" },
+                dosage: { type: "STRING", description: "Liều lượng và đường dùng khuyến nghị cho một lần dùng (ví dụ: 500mg uống)" },
+                frequency: { type: "STRING", description: "Tần suất dùng khuyến nghị (ví dụ: Mỗi 4-6 giờ khi cần, tối đa 4g/ngày)" },
+                indication: { type: "STRING", description: "Chỉ định chính cho tình trạng này" }
+            },
+            propertyOrdering: ["name", "dosage", "frequency", "indication"]
+        },
+        criticalWarnings: {
+            type: "ARRAY",
+            description: "3 Cảnh báo/Chống chỉ định quan trọng nhất liên quan đến thuốc này",
+            items: { type: "STRING" }
+        }
+    },
+    propertyOrdering: ["firstLineDrug", "criticalWarnings"]
+};
+
+
+// Helper function to handle exponential backoff for API calls
 const fetchWithRetry = async (url, options, maxRetries = 5) => {
     let lastError = null;
     for (let i = 0; i < maxRetries; i++) {
         try {
             const response = await fetch(url, options);
-            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+            if (!response.ok) {
+                // Try to read error body if available
+                const errorBody = await response.text();
+                throw new Error(`HTTP error! status: ${response.status}. Response: ${errorBody.substring(0, 100)}...`);
+            }
             return response;
         } catch (error) {
             lastError = error;
             const delay = Math.pow(2, i) * 1000;
-            if (i < maxRetries - 1) await new Promise(r => setTimeout(r, delay));
+            if (i < maxRetries - 1) {
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
         }
     }
-    throw new Error(`API failed after ${maxRetries} retries. Last error: ${lastError?.message}`);
+    throw new Error(`API failed after ${maxRetries} retries. Last error: ${lastError.message}`);
 };
+
+// --- PARSING HELPERS for Plan (Feature 1) ---
+const parsePlan = (planText) => {
+    if (!planText) return [];
+    // Split by the pattern \n followed by a number and parenthesis (e.g., \n1) )
+    const sections = planText.split(/\n\s*(?=\d+\) )/);
+    return sections.filter(s => s.trim() !== '').map((section, index) => {
+        // Use a more robust regex to capture the number, title, and content
+        const match = section.match(/^(\d+\) [^\n:]+):?\s*(.*)/s);
+        if (match) {
+            const [_, title, content] = match;
+            return { id: index, title: title.trim(), content: content.trim() };
+        }
+        // Handle the main title if it exists
+        if (section.startsWith('**KẾ HOẠCH')) {
+            return null; // Skip main title
+        }
+        return { id: index, title: 'Nội dung', content: section.trim() };
+    }).filter(s => s !== null);
+};
+
+// --- PARSING HELPERS for Home Care (Feature 3) ---
+const parseHomeCare = (homeCareText) => {
+    if (!homeCareText) return [];
+    // Use regex to split by the bold titles (e.g., **TITLE**)
+    const sections = homeCareText.split(/(\*\*[^**]+\*\*)/).filter(s => s.trim());
+    const result = [];
+    for (let i = 0; i < sections.length; i += 2) {
+        if (sections[i + 1]) {
+            result.push({
+                id: i / 2,
+                title: sections[i].replace(/\*\*|:/g, '').trim(),
+                content: sections[i+1].trim()
+            });
+        }
+    }
+    return result;
+};
+
 
 const App = () => {
     const [reason, setReason] = useState('');
+    // State for API Key, loads from localStorage for persistence
+    // NOTE: This fallback ensures the app works correctly outside the Canvas environment.
+    const [apiKey, setApiKey] = useState(() => localStorage.getItem('geminiApiKey') || ''); 
     const [plan, setPlan] = useState('');
     const [triageResult, setTriageResult] = useState(null);
     const [homeCareInstructions, setHomeCareInstructions] = useState('');
+    const [differentialResult, setDifferentialResult] = useState(null); 
+    const [drugAdviceResult, setDrugAdviceResult] = useState(null);
+    
+    // State variables for loading status
     const [isLoadingPlan, setIsLoadingPlan] = useState(false);
     const [isLoadingTriage, setIsLoadingTriage] = useState(false);
     const [isLoadingHomeCare, setIsLoadingHomeCare] = useState(false);
+    const [isLoadingDifferential, setIsLoadingDifferential] = useState(false);
+    const [isLoadingDrugAdvice, setIsLoadingDrugAdvice] = useState(false);
+    
     const [error, setError] = useState(null);
 
-    // API key handled in UI and localStorage to avoid editing source code
-    const [apiKeyInput, setApiKeyInput] = useState(localStorage.getItem('GC_API_KEY') || '');
-    const saveApiKey = () => {
-        localStorage.setItem('GC_API_KEY', apiKeyInput.trim());
-        alert('API key đã lưu trong trình duyệt.');
+    const parsedPlan = useMemo(() => parsePlan(plan), [plan]);
+    const parsedHomeCare = useMemo(() => parseHomeCare(homeCareInstructions), [homeCareInstructions]);
+
+    // Handler to update API key and persist it
+    const handleApiKeyChange = (e) => {
+        const newKey = e.target.value;
+        setApiKey(newKey);
+        localStorage.setItem('geminiApiKey', newKey); // Persist key
     };
-    const getApiKey = () => localStorage.getItem('GC_API_KEY') || '';
 
     const handleAPICall = useCallback(async (type) => {
-        if (!reason.trim()) { setError('Vui lòng nhập \"Lý do đến trạm\"'); return; }
-        setError(null);
-        let setLoadState, setContent, systemInstruction, isJson = false;
-        if (type === 'plan') { setLoadState = setIsLoadingPlan; setContent = setPlan; systemInstruction = SYSTEM_INSTRUCTION_PLAN; }
-        else if (type === 'triage') { setLoadState = setIsLoadingTriage; setContent = setTriageResult; systemInstruction = SYSTEM_INSTRUCTION_TRIAGE; isJson = true; }
-        else if (type === 'homecare') { setLoadState = setIsLoadingHomeCare; setContent = setHomeCareInstructions; systemInstruction = SYSTEM_INSTRUCTION_HOME_CARE; }
-        else return;
+        if (!reason.trim()) {
+            setError('Vui lòng nhập "Lý do đến trạm" để bắt đầu.');
+            return;
+        }
 
-        const apiKey = getApiKey();
-        if (!apiKey) { setError('API key chưa được nhập. Vui lòng nhập API key và bấm Lưu.'); return; }
+        // MANDATORY: Check for API Key
+        if (!apiKey.trim()) {
+            setError('Lỗi: Vui lòng nhập Gemini API Key để thực hiện chức năng này.');
+            return;
+        }
+
+        setError(null);
+        let setLoadState, setContent, systemInstruction, isJson = false, schema = null;
+        
+        if (type === 'plan') {
+            setLoadState = setIsLoadingPlan;
+            setContent = setPlan;
+            systemInstruction = SYSTEM_INSTRUCTION_PLAN;
+        } else if (type === 'triage') {
+            setLoadState = setIsLoadingTriage;
+            setContent = setTriageResult;
+            systemInstruction = SYSTEM_INSTRUCTION_TRIAGE;
+            isJson = true;
+            schema = TRIAGE_SCHEMA;
+        } else if (type === 'homecare') {
+            setLoadState = setIsLoadingHomeCare;
+            setContent = setHomeCareInstructions;
+            systemInstruction = SYSTEM_INSTRUCTION_HOME_CARE;
+        } else if (type === 'differential') { 
+            setLoadState = setIsLoadingDifferential;
+            setContent = setDifferentialResult;
+            systemInstruction = SYSTEM_INSTRUCTION_DIFFERENTIAL;
+            isJson = true;
+            schema = DIFFERENTIAL_SCHEMA;
+        } else if (type === 'drugAdvice') {
+            setLoadState = setIsLoadingDrugAdvice;
+            setContent = setDrugAdviceResult;
+            systemInstruction = SYSTEM_INSTRUCTION_DRUG_ADVICE;
+            isJson = true;
+            schema = DRUG_ADVICE_SCHEMA;
+        } else {
+            return;
+        }
 
         setLoadState(true);
-        setContent(null);
+        setContent(null); // Clear previous result
 
         const modelName = "gemini-2.5-flash-preview-09-2025";
+        // Use the API key from the state for the request
         const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
-        const userQuery = `Lý do đến trạm: \"${reason.trim()}\"`;
+
+        const userQuery = `Lý do đến trạm: "${reason.trim()}"`;
 
         let payload = {
             contents: [{ parts: [{ text: userQuery }] }],
-            systemInstruction: { parts: [{ text: systemInstruction }] }
+            systemInstruction: {
+                parts: [{ text: systemInstruction }]
+            },
         };
+
         if (isJson) {
-            payload.generationConfig = { responseMimeType: "application/json", responseSchema: TRIAGE_SCHEMA };
+            payload.generationConfig = {
+                responseMimeType: "application/json",
+                responseSchema: schema
+            };
         }
 
         try {
-            const response = await fetchWithRetry(apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            const response = await fetchWithRetry(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
             const result = await response.json();
             const candidate = result.candidates?.[0];
+
             if (isJson) {
                 const jsonText = candidate?.content?.parts?.[0]?.text;
                 if (jsonText) {
-                    try { const parsedJson = JSON.parse(jsonText); setTriageResult(parsedJson); }
-                    catch (e) { console.error('JSON Parse Error:', e); setError('Lỗi phân tích kết quả Triage.'); }
-                } else setError('Không thể tạo kết quả Triage.');
+                    try {
+                        const parsedJson = JSON.parse(jsonText);
+                        if (type === 'triage') setTriageResult(parsedJson);
+                        if (type === 'differential') setDifferentialResult(parsedJson); 
+                        if (type === 'drugAdvice') setDrugAdviceResult(parsedJson);
+                    } catch (e) {
+                        console.error('JSON Parse Error:', e);
+                        setError(`Lỗi phân tích kết quả ${type === 'triage' ? 'Triage' : type === 'differential' ? 'Chẩn đoán Phân biệt' : 'Gợi ý Thuốc'}. Vui lòng thử lại.`);
+                    }
+                } else {
+                    setError('Không thể tạo kết quả JSON. Vui lòng thử lại.');
+                }
             } else {
-                const generatedText = candidate?.content?.parts?.[0]?.text || 'Không thể tạo nội dung.';
-                const cleanedText = generatedText.replace(/^```\\w*\\n|```$/g, '').trim();
+                const generatedText = candidate?.content?.parts?.[0]?.text || 'Không thể tạo nội dung. Vui lòng thử lại.';
+                const cleanedText = generatedText.replace(/^```\w*\n|```$/g, '').trim();
                 setContent(cleanedText);
             }
-        } catch (err) { console.error('API Error:', err); setError(`Lỗi API: ${err.message}`); }
-        finally { setLoadState(false); }
-    }, [reason]);
+
+        } catch (err) {
+            console.error('API Error:', err);
+            setError(`Đã xảy ra lỗi API: ${err.message}`);
+        } finally {
+            setLoadState(false);
+        }
+    }, [reason, apiKey]);
 
     const generatePlan = () => handleAPICall('plan');
     const generateTriage = () => handleAPICall('triage');
     const generateHomeCare = () => handleAPICall('homecare');
+    const generateDifferential = () => handleAPICall('differential'); 
+    const generateDrugAdvice = () => handleAPICall('drugAdvice');
 
     const copyToClipboard = (text, name) => {
-        if (!text) return;
-        navigator.clipboard.writeText(text).then(() => alert(`Đã sao chép ${name} vào clipboard.`));
+        if (text) {
+            const tempTextArea = document.createElement('textarea');
+            // Use the raw plan text for copy operation
+            const textToCopy = (name === "Kế hoạch Sơ cấp cứu") ? plan : 
+                               (name === "Hướng dẫn Chăm sóc Tại nhà") ? homeCareInstructions :
+                               JSON.stringify(text, null, 2);
+                               
+            tempTextArea.value = textToCopy;
+            document.body.appendChild(tempTextArea);
+            tempTextArea.select();
+            document.execCommand('copy');
+            document.body.removeChild(tempTextArea);
+
+            // Using custom alert substitute
+            const messageBox = document.createElement('div');
+            messageBox.style.cssText = 'position:fixed;top:20px;right:20px;padding:10px 20px;background-color:#4CAF50;color:white;border-radius:5px;z-index:1000;box-shadow:0 4px 6px rgba(0,0,0,0.1);';
+            messageBox.textContent = `Đã sao chép ${name} vào clipboard!`;
+            document.body.appendChild(messageBox);
+            setTimeout(() => {
+                document.body.removeChild(messageBox);
+            }, 2000);
+        }
     };
 
     const getTriageColor = (level) => {
         switch (level) {
-            case 'Cấp 1': return 'background:#dc2626;color:white;padding:4px;border-radius:999px;font-weight:700;';
-            case 'Cấp 2': return 'background:#f97316;color:white;padding:4px;border-radius:999px;font-weight:700;';
-            case 'Cấp 3': return 'background:#f59e0b;color:#111;padding:4px;border-radius:999px;font-weight:700;';
-            case 'Cấp 4': return 'background:#16a34a;color:white;padding:4px;border-radius:999px;font-weight:700;';
-            case 'Cấp 5': return 'background:#3b82f6;color:white;padding:4px;border-radius:999px;font-weight:700;';
-            default: return 'background:#9ca3af;color:white;padding:4px;border-radius:999px;font-weight:700;';
+            case 'Cấp 1': return 'bg-red-600 text-white';
+            case 'Cấp 2': return 'bg-orange-500 text-white';
+            case 'Cấp 3': return 'bg-yellow-400 text-gray-800';
+            case 'Cấp 4': return 'bg-green-500 text-white';
+            case 'Cấp 5': return 'bg-blue-500 text-white';
+            default: return 'bg-gray-400 text-white';
         }
     };
 
-    const isAnyLoading = isLoadingPlan || isLoadingTriage || isLoadingHomeCare;
+    const getLikelihoodColor = (likelihood) => {
+        const normalized = likelihood.toLowerCase().trim();
+        if (normalized.includes('rất cao')) return 'bg-red-200 text-red-800 border-red-300';
+        if (normalized.includes('cao')) return 'bg-orange-200 text-orange-800 border-orange-300';
+        if (normalized.includes('trung bình')) return 'bg-yellow-100 text-yellow-800 border-yellow-300';
+        if (normalized.includes('thấp')) return 'bg-green-100 text-green-800 border-green-300';
+        return 'bg-gray-100 text-gray-800 border-gray-300';
+    };
+    
+    const isAnyLoading = isLoadingPlan || isLoadingTriage || isLoadingHomeCare || isLoadingDifferential || isLoadingDrugAdvice;
 
     return (
-        <div style={{minHeight:'100vh',padding:20,background:'#f8fafc',fontFamily:'Inter, system-ui, Arial'}}>
-            <div style={{maxWidth:900,margin:'0 auto'}}>
-                <header style={{textAlign:'center',marginBottom:24}}>
-                    <h1 style={{fontSize:28,color:'#075985',display:'flex',alignItems:'center',justifyContent:'center',gap:10}}><Heart />KẾ HOẠCH CẤP CỨU TRẠM Y TẾ</h1>
-                    <p style={{color:'#475569'}}>Chạy cục bộ. Nhập API key một lần. Dùng Chrome mở địa chỉ http://localhost:5173</p>
+        <div className="min-h-screen p-4 sm:p-8 bg-gray-50 font-sans">
+            <script src="https://cdn.tailwindcss.com"></script>
+            <style jsx="true">{`
+                @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+                body { font-family: 'Inter', sans-serif; }
+                .card-shadow { box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05); }
+                .content-list li::marker { content: '• '; font-size: 1.2em; color: #3b82f6; }
+                .content-list ul { margin-left: 1.5rem; }
+            `}</style>
+            <div className="max-w-4xl mx-auto">
+                <header className="mb-8 text-center">
+                    <h1 className="text-3xl sm:text-4xl font-bold text-sky-800 flex items-center justify-center">
+                        <Heart className="w-8 h-8 mr-3 text-red-500" />
+                        CÔNG CỤ HỖ TRỢ CHẨN ĐOÁN VÀ CẤP CỨU TRẠM Y TẾ
+                    </h1>
+                    <p className="text-gray-600 mt-2">Sử dụng trí tuệ nhân tạo để lập kế hoạch, phân loại cấp cứu và chẩn đoán.</p>
                 </header>
 
-                <div style={{background:'#fff',padding:16,borderRadius:12,boxShadow:'0 10px 15px rgba(0,0,0,0.05)',border:'1px solid #e0f2fe',marginBottom:16}}>
-                    <label style={{display:'block',fontWeight:700,marginBottom:8, color:'#334155'}}>API Key (Google Generative Language)</label>
-                    <div style={{display:'flex',gap:8}}>
-                        <input value={apiKeyInput} onChange={(e) => setApiKeyInput(e.target.value)} placeholder="Nhập API key vào đây" style={{flex:1,padding:10,borderRadius:8,border:'1px solid #cbd5e1'}} />
-                        <button onClick={saveApiKey} style={{padding:'10px 12px',background:'#06b6d4',color:'white',borderRadius:8}}>Lưu</button>
+                {/* Input Area */}
+                <div className="bg-white p-6 rounded-xl card-shadow mb-8 border border-sky-100">
+                    <label htmlFor="reason-input" className="block text-lg font-semibold text-gray-700 mb-3 flex items-center">
+                        <Droplet className="w-5 h-5 mr-2 text-sky-600" />
+                        Lý do đến trạm (Triệu chứng / Chấn thương)
+                    </label>
+                    <textarea
+                        id="reason-input"
+                        className="w-full p-4 border border-gray-300 rounded-lg focus:ring-sky-500 focus:border-sky-500 transition duration-150 ease-in-out resize-y min-h-[120px]"
+                        placeholder="Ví dụ: Bệnh nhân bị sốt cao 39.5°C kèm đau đầu và nôn ói. Hoặc: Bị té xe, chấn thương cẳng chân phải, đang chảy máu."
+                        value={reason}
+                        onChange={(e) => setReason(e.target.value)}
+                        rows="4"
+                        disabled={isAnyLoading}
+                    ></textarea>
+
+                    {/* API Key Input Field */}
+                    <div className="mt-4 p-3 bg-yellow-50 rounded-lg border border-yellow-300">
+                        <label htmlFor="api-key-input" className="block text-sm font-bold text-yellow-800 mb-2 flex items-center">
+                            <Key className="w-4 h-4 mr-1.5 text-yellow-600" />
+                            Gemini API Key (Bắt buộc khi triển khai ngoài Canvas)
+                        </label>
+                        <textarea
+                            id="api-key-input"
+                            className="w-full p-2 text-sm border border-yellow-400 rounded-lg focus:ring-yellow-500 focus:border-yellow-500 transition duration-150 ease-in-out bg-white resize-none h-16 text-gray-800"
+                            placeholder="Nhập API Key của bạn tại đây..."
+                            value={apiKey}
+                            onChange={handleApiKeyChange}
+                            rows="2"
+                            disabled={isAnyLoading}
+                            style={{ fontFamily: 'monospace' }}
+                        />
                     </div>
-                    <p style={{marginTop:8,color:'#64748b',fontSize:13}}>API key được lưu trong trình duyệt. Không cần sửa code.</p>
+                    
+                    {/* Action Buttons: Flexible grid - 5 total features */}
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-4">
+                        <button
+                            onClick={generateTriage}
+                            disabled={isAnyLoading}
+                            className={`py-3 px-1 rounded-lg font-bold text-white transition duration-200 ease-in-out flex items-center justify-center text-xs sm:text-sm shadow-md
+                                ${isLoadingTriage 
+                                    ? 'bg-indigo-300 cursor-not-allowed opacity-60' 
+                                    : 'bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800'}`}
+                        >
+                            {isLoadingTriage ? (
+                                <span className="flex items-center">
+                                    <RefreshCw className="w-4 h-4 animate-spin mr-1.5" />
+                                    Đang xử lý...
+                                </span>
+                            ) : (
+                                <>
+                                    <Zap className="w-4 h-4 mr-1.5" />
+                                    ✨ Triage
+                                </>
+                            )}
+                        </button>
+                        
+                        <button
+                            onClick={generateDrugAdvice}
+                            disabled={isAnyLoading}
+                            className={`py-3 px-1 rounded-lg font-bold text-white transition duration-200 ease-in-out flex items-center justify-center text-xs sm:text-sm shadow-md
+                                ${isLoadingDrugAdvice
+                                    ? 'bg-red-300 cursor-not-allowed opacity-60' 
+                                    : 'bg-red-600 hover:bg-red-700 active:bg-red-800'}`}
+                        >
+                            {isLoadingDrugAdvice ? (
+                                <span className="flex items-center">
+                                    <RefreshCw className="w-4 h-4 animate-spin mr-1.5" />
+                                    Đang xử lý...
+                                </span>
+                            ) : (
+                                <>
+                                    <Pill className="w-4 h-4 mr-1.5" />
+                                    ✨ Gợi ý Thuốc
+                                </>
+                            )}
+                        </button>
+                        
+                        <button
+                            onClick={generateDifferential}
+                            disabled={isAnyLoading}
+                            className={`py-3 px-1 rounded-lg font-bold text-white transition duration-200 ease-in-out flex items-center justify-center text-xs sm:text-sm shadow-md
+                                ${isLoadingDifferential 
+                                    ? 'bg-purple-300 cursor-not-allowed opacity-60' 
+                                    : 'bg-purple-600 hover:bg-purple-700 active:bg-purple-800'}`}
+                        >
+                            {isLoadingDifferential ? (
+                                <span className="flex items-center">
+                                    <RefreshCw className="w-4 h-4 animate-spin mr-1.5" />
+                                    Đang xử lý...
+                                </span>
+                            ) : (
+                                <>
+                                    <Stethoscope className="w-4 h-4 mr-1.5" />
+                                    ✨ Chẩn đoán PB
+                                </>
+                            )}
+                        </button>
+
+                         <button
+                            onClick={generateHomeCare}
+                            disabled={isAnyLoading}
+                            className={`py-3 px-1 rounded-lg font-bold text-white transition duration-200 ease-in-out flex items-center justify-center text-xs sm:text-sm shadow-md
+                                ${isLoadingHomeCare 
+                                    ? 'bg-teal-300 cursor-not-allowed opacity-60' 
+                                    : 'bg-teal-600 hover:bg-teal-700 active:bg-teal-800'}`}
+                        >
+                            {isLoadingHomeCare ? (
+                                <span className="flex items-center">
+                                    <RefreshCw className="w-4 h-4 animate-spin mr-1.5" />
+                                    Đang xử lý...
+                                </span>
+                            ) : (
+                                <>
+                                    <Home className="w-4 h-4 mr-1.5" />
+                                    ✨ HD Tại nhà
+                                </>
+                            )}
+                        </button>
+                        
+                        {/* Final button - main plan generation */}
+                        <button
+                            onClick={generatePlan}
+                            disabled={isAnyLoading}
+                            className={`py-3 px-1 rounded-lg font-bold text-white transition duration-200 ease-in-out flex items-center justify-center text-xs sm:text-sm shadow-md
+                                ${isLoadingPlan 
+                                    ? 'bg-sky-400 cursor-not-allowed opacity-60' 
+                                    : 'bg-sky-600 hover:bg-sky-700 active:bg-sky-800'}`}
+                        >
+                            {isLoadingPlan ? (
+                                <span className="flex items-center">
+                                    <RefreshCw className="w-4 h-4 animate-spin mr-1.5" />
+                                    Đang xử lý...
+                                </span>
+                            ) : (
+                                <>
+                                    <Send className="w-4 h-4 mr-1.5" />
+                                    Lập KẾ HOẠCH
+                                </>
+                            )}
+                        </button>
+                    </div>
+
+                    {error && (
+                        <div className="mt-4 p-3 bg-red-100 text-red-700 rounded-lg flex items-start">
+                            <AlertTriangle className="w-5 h-5 mr-2 flex-shrink-0 mt-0.5" />
+                            {error}
+                        </div>
+                    )}
+                </div>
+                
+                {/* Differential Diagnosis Output Area (Feature 4) */}
+                <div className="bg-white p-6 rounded-xl card-shadow border border-purple-100 mb-8">
+                    <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center">
+                        <Stethoscope className="w-5 h-5 mr-2 text-purple-600" />
+                        ✨ GỢI Ý CHẨN ĐOÁN PHÂN BIỆT
+                    </h2>
+                    {differentialResult && differentialResult.differentialDiagnosis ? (
+                        <div className="p-4 rounded-lg bg-purple-50 border border-purple-200">
+                            <ul className="space-y-4">
+                                {differentialResult.differentialDiagnosis.map((item, index) => (
+                                    <li key={index} className="p-3 border-l-4 border-purple-400 bg-white rounded-lg shadow-md">
+                                        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-1">
+                                            <span className="font-bold text-purple-800 text-base">{item.diagnosis}</span>
+                                            <span className={`text-xs font-semibold px-2 py-0.5 mt-1 sm:mt-0 rounded-full border ${getLikelihoodColor(item.likelihood)}`}>
+                                                {item.likelihood}
+                                            </span>
+                                        </div>
+                                        <p className="text-sm text-gray-600 italic mt-1">
+                                            <span className="font-semibold text-purple-700">Lý do:</span> {item.rationale}
+                                        </p>
+                                    </li>
+                                ))}
+                            </ul>
+                            <div className="text-right mt-3">
+                                <button
+                                    onClick={() => copyToClipboard(differentialResult, "Kết quả Chẩn đoán Phân biệt")}
+                                    className="p-1.5 bg-purple-200 text-purple-700 rounded-full hover:bg-purple-300 transition duration-150 text-xs font-medium"
+                                    title="Sao chép kết quả (JSON)"
+                                >
+                                    <Clipboard className="w-4 h-4 inline-block mr-1" />
+                                    Sao chép (JSON)
+                                </button>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="text-center py-10 text-gray-500 italic bg-gray-50 rounded-lg border border-dashed border-gray-300">
+                            Nhấn nút "✨ Chẩn đoán Phân biệt" để nhận gợi ý chẩn đoán dựa trên triệu chứng.
+                        </div>
+                    )}
                 </div>
 
-                <div style={{background:'#fff',padding:16,borderRadius:12,boxShadow:'0 10px 15px rgba(0,0,0,0.05)',border:'1px solid #e0f2fe',marginBottom:16}}>
-                    <label style={{display:'block',fontWeight:700,marginBottom:8,color:'#334155'}}>Lý do đến trạm</label>
-                    <textarea value={reason} onChange={(e)=>setReason(e.target.value)} rows={4} placeholder='Ví dụ: Bệnh nhân sốt cao 39.5°C kèm đau đầu và nôn ói.' style={{width:'100%',padding:12,borderRadius:8,border:'1px solid #cbd5e1'}} />
-                    <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:8,marginTop:12}}>
-                        <button onClick={generateTriage} disabled={isAnyLoading} style={{padding:10,background:'#4f46e5',color:'white',borderRadius:8}}>✨ Triage Nhanh</button>
-                        <button onClick={generateHomeCare} disabled={isAnyLoading} style={{padding:10,background:'#0ea5a4',color:'white',borderRadius:8}}>✨ Hướng dẫn Tại nhà</button>
-                        <button onClick={generatePlan} disabled={isAnyLoading} style={{padding:10,background:'#0ea5e9',color:'white',borderRadius:8}}>Lập KẾ HOẠCH SƠ CẤP CỨU</button>
-                    </div>
-                    {error && <div style={{marginTop:12,padding:10,background:'#fee2e2',color:'#991b1b',borderRadius:8}}>{error}</div>}
+                {/* Drug Advice Output Area (Feature 5) */}
+                <div className="bg-white p-6 rounded-xl card-shadow border border-red-100 mb-8">
+                    <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center">
+                        <Pill className="w-5 h-5 mr-2 text-red-600" />
+                        ✨ GỢI Ý THUỐC ĐIỀU TRỊ VÀ CẢNH BÁO
+                    </h2>
+                    {drugAdviceResult && drugAdviceResult.firstLineDrug ? (
+                        <div className="p-4 rounded-lg bg-red-50 border border-red-200">
+                            <h3 className="text-lg font-bold text-red-800 mb-3 border-b border-red-300 pb-2">
+                                Thuốc Điều Trị Ban Đầu (First Line Drug)
+                            </h3>
+                            <div className="space-y-2 text-gray-700 mb-4">
+                                <p><span className="font-semibold text-red-700">Tên gốc:</span> {drugAdviceResult.firstLineDrug.name}</p>
+                                <p><span className="font-semibold text-red-700">Liều dùng (1 lần):</span> {drugAdviceResult.firstLineDrug.dosage}</p>
+                                <p><span className="font-semibold text-red-700">Tần suất:</span> {drugAdviceResult.firstLineDrug.frequency}</p>
+                                <p><span className="font-semibold text-red-700">Chỉ định:</span> {drugAdviceResult.firstLineDrug.indication}</p>
+                            </div>
+                            
+                            <h3 className="font-bold text-gray-700 mb-2 border-l-4 border-red-400 pl-2">3 Cảnh báo/Chống chỉ định Quan trọng:</h3>
+                            <ul className="list-disc list-inside space-y-1 text-red-800 pl-4">
+                                {drugAdviceResult.criticalWarnings.map((warning, index) => (
+                                    <li key={index} className="text-sm font-medium">{warning}</li>
+                                ))}
+                            </ul>
+
+                            <div className="text-right mt-3">
+                                <button
+                                    onClick={() => copyToClipboard(drugAdviceResult, "Kết quả Gợi ý Thuốc")}
+                                    className="p-1.5 bg-red-200 text-red-700 rounded-full hover:bg-red-300 transition duration-150 text-xs font-medium"
+                                    title="Sao chép kết quả (JSON)"
+                                >
+                                    <Clipboard className="w-4 h-4 inline-block mr-1" />
+                                    Sao chép (JSON)
+                                </button>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="text-center py-10 text-gray-500 italic bg-gray-50 rounded-lg border border-dashed border-gray-300">
+                            Nhấn nút "✨ Gợi ý Thuốc" để nhận thông tin về thuốc điều trị ban đầu và các cảnh báo liên quan.
+                        </div>
+                    )}
                 </div>
 
-                <div style={{background:'#fff',padding:16,borderRadius:12,boxShadow:'0 10px 15px rgba(0,0,0,0.05)',border:'1px solid #e6e6e6',marginBottom:16}}>
-                    <h2 style={{margin:0,fontSize:18,color:'#0f172a',display:'flex',alignItems:'center',gap:8}}><Zap />✨ ĐÁNH GIÁ TRIAGE NHANH</h2>
+                {/* Triage Output Area (Feature 2) */}
+                <div className="bg-white p-6 rounded-xl card-shadow border border-sky-100 mb-8">
+                    <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center">
+                        <Zap className="w-5 h-5 mr-2 text-indigo-600" />
+                        ✨ ĐÁNH GIÁ TRIAGE NHANH
+                    </h2>
                     {triageResult ? (
-                        <div style={{marginTop:12,padding:12,background:'#eef2ff',borderRadius:8,border:'1px solid #c7d2fe'}}>
-                            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',borderBottom:'1px solid #c7d2fe',paddingBottom:8}}>
-                                <div style={{fontWeight:700,color:'#1e293b'}}>{triageResult.summary}</div>
-                                <div style={{...{fontSize:12},...{}}}>
-                                    <span style={{display:'inline-block',padding:'6px 10px',borderRadius:999,background:'#6366f1',color:'white',fontWeight:700}}>{triageResult.triageLevel}: {triageResult.priority}</span>
+                        <div className="p-4 rounded-lg bg-indigo-50 border border-indigo-200">
+                            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-3 pb-3 border-b border-indigo-300">
+                                <p className="text-lg font-bold text-indigo-800">{triageResult.summary}</p>
+                                <div className={`mt-2 sm:mt-0 px-3 py-1 rounded-full font-bold text-sm ${getTriageColor(triageResult.triageLevel)}`}>
+                                    {triageResult.triageLevel}: {triageResult.priority}
                                 </div>
                             </div>
-                            <h3 style={{marginTop:10,fontWeight:700,color:'#334155'}}>3 Hành động Ưu tiên:</h3>
-                            <ul style={{paddingLeft:18,color:'#475569'}}>{triageResult.immediateActions.map((a,i)=>(<li key={i}>{a}</li>))}</ul>
-                            <div style={{textAlign:'right'}}>
-                                <button onClick={()=>copyToClipboard(JSON.stringify(triageResult,null,2),'Kết quả Triage')} style={{padding:6,background:'#e0e7ff',borderRadius:8}}>Sao chép (JSON)</button>
+                            <h3 className="font-semibold text-gray-700 mb-2 border-l-4 border-indigo-400 pl-2">3 Hành động Ưu tiên:</h3>
+                            <ol className="list-decimal list-inside space-y-2 text-gray-700 pl-4">
+                                {triageResult.immediateActions.map((action, index) => (
+                                    <li key={index} className="text-sm font-medium">{action}</li>
+                                ))}
+                            </ol>
+                            <div className="text-right mt-3">
+                                <button
+                                    onClick={() => copyToClipboard(triageResult, "Kết quả Triage")}
+                                    className="p-1.5 bg-indigo-200 text-indigo-700 rounded-full hover:bg-indigo-300 transition duration-150 text-xs font-medium"
+                                    title="Sao chép kết quả Triage (JSON)"
+                                >
+                                    <Clipboard className="w-4 h-4 inline-block mr-1" />
+                                    Sao chép (JSON)
+                                </button>
                             </div>
                         </div>
-                    ) : <div style={{marginTop:12,color:'#64748b',fontStyle:'italic'}}>Nhấn nút "✨ Triage Nhanh" để nhận đánh giá ưu tiên sơ bộ.</div>}
-                </div>
-
-                <div style={{background:'#fff',padding:16,borderRadius:12,boxShadow:'0 10px 15px rgba(0,0,0,0.05)',border:'1px solid #e6e6e6',marginBottom:16}}>
-                    <h2 style={{margin:0,fontSize:18,color:'#0f172a',display:'flex',alignItems:'center',gap:8}}><Home />✨ HƯỚNG DẪN CHĂM SÓC TẠI NHÀ</h2>
-                    {homeCareInstructions ? (
-                        <div style={{marginTop:12,padding:12,background:'#ecfeff',borderRadius:8,border:'1px solid #bbf7d0'}}>
-                            <pre style={{whiteSpace:'pre-wrap'}}>{homeCareInstructions}</pre>
-                            <div style={{textAlign:'right'}}><button onClick={()=>copyToClipboard(homeCareInstructions,'Hướng dẫn')} style={{padding:6,borderRadius:8,background:'#d1fae5'}}>Sao chép</button></div>
+                    ) : (
+                        <div className="text-center py-10 text-gray-500 italic bg-gray-50 rounded-lg border border-dashed border-gray-300">
+                            Nhấn nút "✨ Triage" để nhận đánh giá ưu tiên sơ bộ.
                         </div>
-                    ) : <div style={{marginTop:12,color:'#64748b',fontStyle:'italic'}}>Nhấn nút "✨ Hướng dẫn Tại nhà" để tạo bản hướng dẫn.</div>}
+                    )}
                 </div>
 
-                <div style={{background:'#fff',padding:16,borderRadius:12,boxShadow:'0 10px 15px rgba(0,0,0,0.05)',border:'1px solid #e6e6e6'}}>
-                    <h2 style={{margin:0,fontSize:18,color:'#0f172a',display:'flex',alignItems:'center',gap:8}}><Clipboard />KẾT QUẢ: Kế hoạch Sơ cấp cứu (7 Mục)</h2>
-                    {plan ? (<div style={{marginTop:12,padding:12,background:'#f8fafc',borderRadius:8}}><pre style={{whiteSpace:'pre-wrap'}}>{plan}</pre><div style={{textAlign:'right'}}><button onClick={()=>copyToClipboard(plan,'Kế hoạch')} style={{padding:6,borderRadius:8,background:'#e2e8f0'}}>Sao chép</button></div></div>) : <div style={{marginTop:12,color:'#64748b',fontStyle:'italic'}}>Nhấn nút 'Lập KẾ HOẠCH SƠ CẤP CỨU' để tạo kế hoạch.</div>}
+                {/* Home Care Output Area (Feature 3) */}
+                <div className="bg-white p-6 rounded-xl card-shadow border border-sky-100 mb-8">
+                    <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center">
+                        <Home className="w-5 h-5 mr-2 text-teal-600" />
+                        ✨ HƯỚNG DẪN CHĂM SÓC TẠI NHÀ
+                    </h2>
+                    {homeCareInstructions ? (
+                        <div className="border border-gray-200 p-4 rounded-lg bg-teal-50 relative">
+                            <ol className="space-y-4">
+                                {parsedHomeCare.map((section) => (
+                                    <li key={section.id} className="text-sm">
+                                        <h3 className="font-bold text-teal-800 text-base mb-1 border-b border-teal-200 pb-1">{section.title}</h3>
+                                        <div className="text-gray-700 content-list whitespace-pre-wrap">{section.content}</div>
+                                    </li>
+                                ))}
+                            </ol>
+                            <button
+                                onClick={() => copyToClipboard(homeCareInstructions, "Hướng dẫn Chăm sóc Tại nhà")}
+                                className="absolute top-2 right-2 p-2 bg-teal-200 text-teal-600 rounded-full hover:bg-teal-300 transition duration-150"
+                                title="Sao chép bản gốc"
+                            >
+                                <Clipboard className="w-4 h-4" />
+                            </button>
+                        </div>
+                    ) : (
+                        <div className="text-center py-10 text-gray-500 italic bg-gray-50 rounded-lg border border-dashed border-gray-300">
+                            Nhấn nút "✨ HD Tại nhà" để tạo bản hướng dẫn đơn giản cho bệnh nhân/người nhà.
+                        </div>
+                    )}
+                </div>
+
+                {/* Plan Output Area (Feature 1) */}
+                <div className="bg-white p-6 rounded-xl card-shadow border border-sky-100">
+                    <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center">
+                        <Clipboard className="w-5 h-5 mr-2 text-gray-600" />
+                        KẾT QUẢ: Kế hoạch Sơ cấp cứu (7 Mục)
+                    </h2>
+                    {plan ? (
+                        <div className="border border-gray-200 p-4 rounded-lg bg-gray-50 relative">
+                            <ol className="space-y-4">
+                                {parsedPlan.map((section) => (
+                                    <li key={section.id} className="text-sm">
+                                        <h3 className="font-bold text-sky-800 text-base mb-1 border-l-4 border-sky-400 pl-2">{section.title}</h3>
+                                        <div className="text-gray-700 content-list whitespace-pre-wrap pl-2">{section.content}</div>
+                                    </li>
+                                ))}
+                            </ol>
+                            <button
+                                onClick={() => copyToClipboard(plan, "Kế hoạch Sơ cấp cứu")}
+                                className="absolute top-2 right-2 p-2 bg-gray-200 text-gray-600 rounded-full hover:bg-gray-300 transition duration-150"
+                                title="Sao chép bản gốc"
+                            >
+                                <Clipboard className="w-4 h-4" />
+                            </button>
+                        </div>
+                    ) : (
+                        <div className="text-center py-10 text-gray-500 italic bg-gray-50 rounded-lg border border-dashed border-gray-300">
+                            Nhấn nút "Lập KẾ HOẠCH" để tạo kế hoạch chi tiết 7 mục.
+                        </div>
+                    )}
                 </div>
             </div>
         </div>
@@ -218,3 +724,4 @@ const App = () => {
 };
 
 export default App;
+
