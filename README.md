@@ -1,18 +1,23 @@
-# health-aid
 
-Project scaffold: Vite + React + TailwindCSS (JavaScript).
-Contains the UI you provided embedded in `src/App.jsx`.
+# capcuu-tram
 
-## Quick start (on a PC / server)
-1. `npm install`
-2. `npm run dev`
-3. Open http://localhost:5173
+Mẫu ứng dụng React (Vite) cho công cụ 'Kế hoạch Cấp cứu Trạm Y tế'.
 
-## Deploy (without local build)
-1. Create a GitHub repository `health-aid`.
-2. Upload all files or drag-and-drop the project folder.
-3. On Vercel: New Project -> Import GitHub repo -> Deploy.
+## Yêu cầu
+- Node.js >= 18
+- Trình duyệt Chrome
 
-Notes:
-- Store Gemini API keys only in the browser UI at runtime.
-- Do not commit private keys to GitHub.
+## Hướng dẫn dùng nhanh (Windows)
+1. Giải nén `capcuu-tram.zip` vào `C:\capcuu-tram` hoặc chỗ bạn muốn.
+2. Mở Command Prompt:
+   ```
+   cd C:\capcuu-tram
+   npm install
+   npm run dev
+   ```
+3. Mở Chrome tới: `http://localhost:5173`
+
+## API key
+- Ứng dụng có ô nhập API key trên giao diện.
+- Dán API key (Google Generative Language) vào ô rồi bấm **Lưu**.
+- API key được lưu trong localStorage của trình duyệt. Bạn không cần sửa code.
